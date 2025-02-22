@@ -17,7 +17,12 @@ Have [this ESP32](https://www.circuitstate.com/pinouts/doit-esp32-devkit-v1-wifi
 
 Some pins should be left floating during boot, this pins can be used but will only use them if nothing left.
 
+### Illiminated push button 
+Have [this button: Ring, 5V, Momentary, Blue](https://www.aliexpress.com/item/4000032282063.html) 
+Pin functions are marked on switch. Will use C (common) and NO (Normally open)
 
+Use + and - for LED, note there is already a resistor inside so no current limiting resistor is needed.
+Current is around 2mA so can be driven from GPIO pin.
 
 
 ## Plan
