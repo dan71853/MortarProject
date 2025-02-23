@@ -21,13 +21,18 @@ const uint16_t TRIGGER_DELAY_MAX = 1000;
 
 uint16_t fireTimeThreshold = 1000;  // Time solenoid is open for
 const uint16_t FIRE_TIME_MIN = 100;
-const uint16_t FIRE_TIME_MAX = 1000;
+const uint16_t FIRE_TIME_MAX = 5000;
+
+//Analog resoloution
+const uint8_t ANALOG_RES = 10;
 
 // State machine states
 enum States {
   DISARMED,
   ARMED,
+  TRIGGERED_SETUP,
   TRIGGERED,
+  FIRING_SETUP,
   FIRING,
   PRELOAD
 };
@@ -37,9 +42,18 @@ volatile enum States currentState = DISARMED;
 char *stateNames[] = {
   "DISARMED",
   "ARMED",
+  "TRIGGERED_SETUP",
   "TRIGGERED",
+  "FIRING_SETUP",
   "FIRING",
   "PRELOAD",
+};
+
+enum LedMode {
+  LED_OFF,         //Disarmed
+  LED_ON,          //Armed
+  LED_BLINK_FAST,  //Firing
+  LED_BLINK_SLOW   //Error
 };
 
 void setup() {
@@ -61,7 +75,7 @@ void setup() {
   digitalWrite(STATUS_LED, LOW);
 
   // Setup analog inputs, set the resoloution to 10Bits (0-1024)
-  analogReadResolution(10);
+  analogReadResolution(ANALOG_RES);
   pinMode(DELAY_POT, INPUT);
   pinMode(POWER_POT, INPUT);
 }
@@ -85,91 +99,112 @@ uint32_t triggeredTimer = millis();
 uint32_t fireTimer = millis();
 void loop() {
 
-  if (lastState != currentState) {
+  if (lastState != currentState) {  //used for debugging
     Serial.printf("State: %s\n", stateNames[currentState]);
   }
 
   switch (currentState) {
-    case DISARMED:
-      if (lastState != currentState) {
-        // Run this part only once
-        lastState = currentState;
-      }
-      digitalWrite(SOLENOID_PIN, !SOLENOID_ON_STATE);
 
-      if (digitalRead(LIMIT_SW) == LIMIT_SWITCH_ACTIVATED) {
+    case DISARMED:
+      digitalWrite(SOLENOID_PIN, !SOLENOID_ON_STATE);  // Force solenoid off
+
+      if (digitalRead(LIMIT_SW) == LIMIT_SWITCH_ACTIVATED) {  //If limit switch is triggered then go to the error state PRELOAD
         currentState = PRELOAD;
-        break;
+        return;
       }
-      digitalWrite(STATUS_LED, LOW);
+      setLED(LED_OFF);
       break;
 
     case ARMED:
-      if (lastState != currentState) {
-        lastState = currentState;
+      digitalWrite(SOLENOID_PIN, !SOLENOID_ON_STATE);         // Force solenoid off
+      if (digitalRead(LIMIT_SW) == LIMIT_SWITCH_ACTIVATED) {  //If limit switch is triggered then start the firing procudure
+        currentState = TRIGGERED_SETUP;
+        return;
       }
-      if (digitalRead(LIMIT_SW) == LIMIT_SWITCH_ACTIVATED) {
-        currentState = TRIGGERED;
-        break;
-      }
-      digitalWrite(STATUS_LED, HIGH);
+      setLED(LED_ON);
       break;
+
+    case TRIGGERED_SETUP:                                                                                                   //This is run once before going to triggered state
+      triggeredTimer = millis();                                                                                            //reset the timer
+      triggerDelayThreshold = map(analogRead(DELAY_POT), 0, pow(2, ANALOG_RES) - 1, TRIGGER_DELAY_MIN, TRIGGER_DELAY_MAX);  //Map the analog reading to the time delay
+      currentState = TRIGGERED;
+      return;
 
     case TRIGGERED:
-      if (lastState != currentState) {
-        lastState = currentState;
-        triggeredTimer = millis();
-        uint16_t potValue = analogRead(DELAY_POT);
-        triggerDelayThreshold = map(potValue, 0, 1023, TRIGGER_DELAY_MIN, TRIGGER_DELAY_MAX);
-        Serial.printf("pot: %d, time: %d\n", potValue, triggerDelayThreshold);
+      if (millis() - triggeredTimer > triggerDelayThreshold) {  //Wait for the initial delay time
+        currentState = FIRING_SETUP;
+        return;
       }
-      if (millis() - triggeredTimer > triggerDelayThreshold) {
-        currentState = FIRING;
-      }
-      blinkLEDFast();
+      setLED(LED_BLINK_FAST);
       break;
 
-    case FIRING:
-      if (lastState != currentState) {
-        lastState = currentState;
-        fireTimer = millis();
-        uint16_t potValue = analogRead(POWER_POT);
-        fireTimeThreshold = map(potValue, 0, 1023, FIRE_TIME_MIN, FIRE_TIME_MAX);
-        digitalWrite(SOLENOID_PIN, SOLENOID_ON_STATE);
-        Serial.printf("pot: %d, time: %d\n", potValue, fireTimeThreshold);
-      }
+    case FIRING_SETUP:  //Open the solenoid and restart the timer
+      fireTimer = millis();
+      fireTimeThreshold = map(analogRead(POWER_POT), 0, pow(2, ANALOG_RES) - 1, FIRE_TIME_MIN, FIRE_TIME_MAX);  //Map the analog reading to the time delay
+      Serial.println(fireTimeThreshold);
+      digitalWrite(SOLENOID_PIN, SOLENOID_ON_STATE);
+      currentState = FIRING;
+      return;
+
+    case FIRING:  //Wait for the motor to fire
       if (millis() - fireTimer > fireTimeThreshold) {
         currentState = DISARMED;
+        return;
       }
-      blinkLEDFast();
+      setLED(LED_BLINK_FAST);
       break;
 
-    case PRELOAD:
-      if (lastState != currentState) {
-        lastState = currentState;
-      }
-      blinkLEDFast();
+    case PRELOAD:              //Error state where the limit switch has been activated when disarmed
+      setLED(LED_BLINK_SLOW);  //Blink the light slowly and wait for the limit switch to be cleared
       if (digitalRead(LIMIT_SW) != LIMIT_SWITCH_ACTIVATED) {
         currentState = DISARMED;
+        return;
       }
       break;
 
     default:
       break;
   }
+
+  lastState = currentState;
 }
 
 uint32_t blinkTimer = millis();
-const uint16_t blinkThreshold = 100;
-bool blinkState = false;
+uint16_t blinkThreshold = 100;
+bool ledState = false;
 /**
- * Blink the STATUS_LED quickly
- * Used to show when the limit switch has been triggered
+ * Set the status LED
  */
-void blinkLEDFast() {
-  if (millis() - blinkTimer > blinkThreshold) {
-    blinkTimer = millis();
-    blinkState = !blinkState;
-    digitalWrite(STATUS_LED, blinkState);
+void setLED(LedMode ledMode) {
+  switch (ledMode) {
+    case LED_OFF:
+      ledState = LOW;
+      break;
+
+    case LED_ON:
+      ledState = HIGH;
+      break;
+
+    case LED_BLINK_FAST:
+      blinkThreshold = 100;
+      if (millis() - blinkTimer > blinkThreshold) {
+        blinkTimer = millis();
+        ledState = !ledState;
+        digitalWrite(STATUS_LED, ledState);
+      }
+      break;
+
+    case LED_BLINK_SLOW:
+      blinkThreshold = 500;
+      if (millis() - blinkTimer > blinkThreshold) {
+        blinkTimer = millis();
+        ledState = !ledState;
+      }
+      break;
+
+    default:
+      Serial.println("Error: Invalid LED mode");
+      break;
   }
+  digitalWrite(STATUS_LED, ledState);
 }
